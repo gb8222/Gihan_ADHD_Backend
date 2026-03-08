@@ -1,7 +1,6 @@
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
-from app.services.speech_feature_extractor import extract_speech_features
-from app.services.speech_predictor import predict_adhd
+from app.ml.predictor import predict_audio_bytes
 
 speech_router = APIRouter(tags=["Speech Analysis"])
 
@@ -13,11 +12,11 @@ async def analyze_speech(
 ):
     """
     Upload a speech audio file and get ADHD prediction.
-    Matches frontend FileUpload.jsx: POST /analyze with FormData(file, child_age).
-    No authentication required — frontend does not send auth headers for this endpoint.
+    Matches frontend FormData(file, child_age).
+    No authentication required.
     """
-    # --- Validate file type ---
     allowed_extensions = {".wav", ".mp3", ".m4a", ".flac", ".ogg", ".webm"}
+
     filename = file.filename or ""
     ext = ("." + filename.rsplit(".", 1)[-1].lower()) if "." in filename else ""
 
@@ -27,37 +26,29 @@ async def analyze_speech(
             detail=f"Unsupported audio format '{ext}'. Allowed: {', '.join(sorted(allowed_extensions))}",
         )
 
-    # --- Read audio bytes ---
     audio_bytes = await file.read()
-    if len(audio_bytes) == 0:
+    if not audio_bytes:
         raise HTTPException(status_code=400, detail="Uploaded file is empty")
 
     try:
-        # --- Extract features ---
-        extraction_result = extract_speech_features(audio_bytes)
-        model_vector = extraction_result["model_vector"]
-        display_features = extraction_result["display_features"]
-
-        # --- Run prediction ---
-        prediction = predict_adhd(model_vector)
-
-        # --- Build response matching AnalysisResults.jsx expected shape ---
-        probability = prediction["probability"]
+        result = predict_audio_bytes(audio_bytes)
+        probability = result["adhd_probability"]
+        display_features = result["features"]
 
         response = {
             "analysis": {
-                "classification": prediction["classification"],
+                "classification": result["classification"],
                 "probability": probability,
-                "confidence": prediction["confidence"],
+                "confidence": result["confidence"],
                 "transcription_available": False,
             },
             "features": {
-                "pitch_mean": round(display_features["pitch_mean"], 2),
-                "jitter": round(display_features["jitter"], 4),
-                "shimmer": round(display_features["shimmer"], 4),
-                "lexical_diversity": round(display_features["lexical_diversity"], 4),
-                "coherence": round(display_features["coherence"], 4),
-                "fillers": display_features["fillers"],
+                "pitch_mean": round(float(display_features["pitch_mean"]), 2),
+                "jitter": round(float(display_features["jitter"]), 4),
+                "shimmer": round(float(display_features["shimmer"]), 4),
+                "lexical_diversity": round(float(display_features["lexical_diversity"]), 4),
+                "coherence": round(float(display_features["coherence"]), 4),
+                "fillers": int(display_features["fillers"]),
             },
             "transcription": None,
             "recommendations": _build_recommendations(probability, child_age),
@@ -69,11 +60,10 @@ async def analyze_speech(
         raise HTTPException(
             status_code=500,
             detail=f"Speech analysis failed: {str(e)}",
-        )
+        ) from e
 
 
 def _build_recommendations(probability: float, child_age: int) -> dict:
-    """Build recommendation object based on ADHD probability and child age."""
     if probability >= 0.7:
         return {
             "warning": "Significant ADHD speech patterns detected",
@@ -87,7 +77,8 @@ def _build_recommendations(probability: float, child_age: int) -> dict:
                 "neurologist or developmental pediatrician for a thorough clinical assessment."
             ),
         }
-    elif probability >= 0.4:
+
+    if probability >= 0.4:
         return {
             "warning": "Some ADHD-related speech patterns observed",
             "note": (
@@ -100,16 +91,16 @@ def _build_recommendations(probability: float, child_age: int) -> dict:
                 "the next visit. Continued monitoring of speech and behavioral patterns is recommended."
             ),
         }
-    else:
-        return {
-            "message": "Speech patterns appear within normal range",
-            "note": (
-                f"The analysis of this {child_age}-year-old's speech patterns shows characteristics "
-                "that fall within the typical range for their age group. No significant ADHD-related "
-                "speech markers were identified."
-            ),
-            "advice": (
-                "Continue supporting your child's development with regular check-ups. "
-                "If you have concerns about attention or behavior, consult your pediatrician."
-            ),
-        }
+
+    return {
+        "message": "Speech patterns appear within normal range",
+        "note": (
+            f"The analysis of this {child_age}-year-old's speech patterns shows characteristics "
+            "that fall within the typical range for their age group. No significant ADHD-related "
+            "speech markers were identified."
+        ),
+        "advice": (
+            "Continue supporting your child's development with regular check-ups. "
+            "If you have concerns about attention or behavior, consult your pediatrician."
+        ),
+    }
