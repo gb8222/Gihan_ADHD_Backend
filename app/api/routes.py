@@ -21,6 +21,16 @@ pwd = CryptContext(schemes=["bcrypt"], deprecated="auto")
 router = APIRouter()
 
 
+@router.get("/")
+async def root():
+    return {
+        "name": "ADHD Voice Base Backend",
+        "endpoints": [
+            "/health",
+            "/analyze",
+        ]
+    }
+
 @router.get("/health")
 async def health():
     return {"ok": True}
