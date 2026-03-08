@@ -1,6 +1,7 @@
 import io
 import os
 import tempfile
+import subprocess
 from typing import Any
 
 import librosa
@@ -51,11 +52,40 @@ def extract_speech_features(audio_bytes: bytes) -> dict[str, Any]:
 def _load_audio(audio_bytes: bytes, target_sr: int = 16000) -> tuple[np.ndarray, int]:
     """
     Load uploaded audio bytes, resample to target_sr, convert to mono, trim silence.
+    Uses librosa.load natively, with a fallback to pydub if unsupported.
     """
     try:
         y, sr = librosa.load(io.BytesIO(audio_bytes), sr=target_sr, mono=True)
-    except Exception as e:
-        raise ValueError(f"Unsupported or corrupted audio file: {e}") from e
+    except Exception as e_librosa:
+        # Fallback to ffmpeg directly for webm/mp4 and other formats
+        temp_in_path = None
+        temp_out_path = None
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".webm") as tmp_in:
+                tmp_in.write(audio_bytes)
+                temp_in_path = tmp_in.name
+                
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_out:
+                temp_out_path = tmp_out.name
+
+            subprocess.run([
+                "ffmpeg", "-y", "-i", temp_in_path, 
+                "-vn", "-acodec", "pcm_s16le", 
+                "-ar", str(target_sr), "-ac", "1", 
+                temp_out_path
+            ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            
+            y, sr = librosa.load(temp_out_path, sr=target_sr, mono=True)
+            
+        except Exception as e_ffmpeg:
+            raise ValueError(f"Unsupported or corrupted audio file. Librosa error: {e_librosa}. FFmpeg fallback error: {e_ffmpeg}") from e_ffmpeg
+        finally:
+            if temp_in_path and os.path.exists(temp_in_path):
+                try: os.remove(temp_in_path)
+                except OSError: pass
+            if temp_out_path and os.path.exists(temp_out_path):
+                try: os.remove(temp_out_path)
+                except OSError: pass
 
     y = np.asarray(y, dtype=np.float32)
 
